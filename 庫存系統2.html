@@ -1,0 +1,641 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>庫存監測平台 - Level 1</title>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.19.3/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    :root { --bg:#0b1220; --card:#121b2f; --muted:#9fb0d0; --text:#e7eeff; --line:#21304f; }
+    body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI"; background:var(--bg); color:var(--text); }
+    header { padding:16px 20px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:12px; }
+    header h1 { font-size:16px; margin:0; letter-spacing:.5px; }
+    main { padding:16px 20px; display:grid; gap:14px; }
+    .grid { display:grid; gap:12px; }
+    .grid.kpi { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .grid.two { grid-template-columns: 1.2fr .8fr; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; }
+    .card h2 { margin:0 0 10px 0; font-size:13px; color:var(--muted); font-weight:600; }
+    .row { display:flex; gap:10px; flex-wrap:wrap; align-items:end; }
+    .field { display:flex; flex-direction:column; gap:6px; }
+    label { font-size:12px; color:var(--muted); }
+    input, select { background:#0e1730; border:1px solid var(--line); color:var(--text); padding:8px 10px; border-radius:10px; outline:none; min-width:170px; }
+    input[type="file"] { padding:7px; }
+    button { background:#1a2a52; border:1px solid var(--line); color:var(--text); padding:9px 12px; border-radius:10px; cursor:pointer; }
+    button:hover { filter:brightness(1.06); }
+    .kpiValue { font-size:20px; font-weight:700; }
+    .kpiSub { font-size:12px; color:var(--muted); margin-top:4px; }
+    .pill { display:inline-block; padding:4px 8px; border:1px solid var(--line); border-radius:999px; font-size:12px; color:var(--muted); }
+    table { width:100%; border-collapse:collapse; font-size:12px; }
+    th, td { border-bottom:1px solid var(--line); padding:8px 6px; text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-weight:600; position:sticky; top:0; background:var(--card); }
+    .tableWrap { max-height:360px; overflow:auto; border-radius:12px; }
+    .hint { font-size:12px; color:var(--muted); line-height:1.5; }
+    .warn { color:#ffd37a; }
+    @media (max-width:1100px){
+      .grid.kpi{ grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .grid.two{ grid-template-columns: 1fr; }
+      input, select{ min-width: 150px; }
+    }
+  </style>
+</head>
+
+<body>
+<header>
+  <h1>庫存監測平台（Level 1）</h1>
+  <span class="pill" id="statusPill">尚未匯入資料</span>
+</header>
+
+<main>
+  <!-- Import -->
+  <section class="card">
+    <h2>資料匯入（5001 / 5002 / 5003）</h2>
+    <div class="row">
+      <div class="field">
+        <label>5001（WIP）</label>
+        <input type="file" id="f5001" accept=".xlsx,.xls,.csv" />
+      </div>
+      <div class="field">
+        <label>5002（OTW）</label>
+        <input type="file" id="f5002" accept=".xlsx,.xls,.csv" />
+      </div>
+      <div class="field">
+        <label>5003（RECEIVING）</label>
+        <input type="file" id="f5003" accept=".xlsx,.xls,.csv" />
+      </div>
+      <button id="btnLoad">匯入並刷新儀表板</button>
+      <button id="btnDemo">載入內建示例資料</button>
+    </div>
+    <p class="hint">
+      目標：把三檔統一成一套維度（BU/Org/料號/Business/Planner/幣別/時間）並可被同一組篩選器與 KPI 驅動。<br/>
+      提醒：若你後續要上正式環境，建議把匯入後資料落地到資料庫（例如 PostgreSQL）並做增量更新，前端只拉彙總結果，效能會穩很多。
+    </p>
+  </section>
+
+  <!-- Filters -->
+  <section class="card">
+    <h2>篩選器（全域）</h2>
+    <div class="row">
+      <div class="field"><label>資料類型</label>
+        <select id="fltType">
+          <option value="">全部</option>
+          <option value="WIP">WIP</option>
+          <option value="OTW">OTW</option>
+          <option value="RECEIVING">RECEIVING</option>
+        </select>
+      </div>
+      <div class="field"><label>BU</label><select id="fltBU"><option value="">全部</option></select></div>
+      <div class="field"><label>Org</label><select id="fltOrg"><option value="">全部</option></select></div>
+      <div class="field"><label>Business</label><select id="fltBiz"><option value="">全部</option></select></div>
+      <div class="field"><label>Planner</label><select id="fltPlanner"><option value="">全部</option></select></div>
+      <div class="field"><label>幣別</label><select id="fltCur"><option value="">全部</option></select></div>
+      <div class="field"><label>料號關鍵字</label><input id="fltItem" placeholder="例如 51.UA310" /></div>
+      <div class="field"><label>品名關鍵字</label><input id="fltName" placeholder="例如 PALLET / CUT" /></div>
+      <div class="field"><label>時間起</label><input id="fltStart" type="date" /></div>
+      <div class="field"><label>時間迄</label><input id="fltEnd" type="date" /></div>
+      <button id="btnApply">套用篩選</button>
+      <button id="btnReset">重置</button>
+    </div>
+    <p class="hint warn" id="dataQualityHint" style="margin-top:10px;"></p>
+  </section>
+
+  <!-- KPI -->
+  <section class="grid kpi">
+    <div class="card">
+      <h2>OTW 總庫存成本</h2>
+      <div class="kpiValue" id="kpiOtwCost">—</div>
+      <div class="kpiSub">Σ(總成本 / Material Amount + DLOH Amount)</div>
+    </div>
+    <div class="card">
+      <h2>庫齡 &gt; 90 天成本</h2>
+      <div class="kpiValue" id="kpiAging90">—</div>
+      <div class="kpiSub">高風險資金占用</div>
+    </div>
+    <div class="card">
+      <h2>提列 / LCM 風險金額</h2>
+      <div class="kpiValue" id="kpiLCM">—</div>
+      <div class="kpiSub">Σ(LCM AMT)</div>
+    </div>
+    <div class="card">
+      <h2>WIP 未入庫缺口</h2>
+      <div class="kpiValue" id="kpiWipGap">—</div>
+      <div class="kpiSub">Σ(未入庫數量)</div>
+    </div>
+    <div class="card">
+      <h2>WIP 計畫達成率</h2>
+      <div class="kpiValue" id="kpiWipHit">—</div>
+      <div class="kpiSub">Σ(實際入庫量)/Σ(計劃入庫量)</div>
+    </div>
+    <div class="card">
+      <h2>WIP 異常工單數</h2>
+      <div class="kpiValue" id="kpiWipAbn">—</div>
+      <div class="kpiSub">缺陷/整合訊息異常</div>
+    </div>
+    <div class="card">
+      <h2>Receiving 到料量</h2>
+      <div class="kpiValue" id="kpiRecvQty">—</div>
+      <div class="kpiSub">Σ(Q’ty)</div>
+    </div>
+    <div class="card">
+      <h2>Consigned 到料占比</h2>
+      <div class="kpiValue" id="kpiConsigned">—</div>
+      <div class="kpiSub">Σ(Qty consigned)/Σ(Qty)</div>
+    </div>
+  </section>
+
+  <!-- Charts + Alerts -->
+  <section class="grid two">
+    <div class="card">
+      <h2>成本趨勢（按月）</h2>
+      <canvas id="chartTrend" height="110"></canvas>
+      <p class="hint">建議後續把趨勢拆成：OTW / WIP / Receiving 三條線，並加入 Forecast 需求線做 Coverage。</p>
+    </div>
+    <div class="card">
+      <h2>預警清單（Top 10）</h2>
+      <div class="tableWrap">
+        <table id="tblAlerts">
+          <thead>
+            <tr>
+              <th>類型</th><th>BU</th><th>Org</th><th>料號</th><th>指標</th><th>數值</th><th>時間</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="hint">Level 1 先做三種：OTW 庫齡>90、WIP 逾期未入庫、OTW LCM 高。</p>
+    </div>
+  </section>
+
+  <!-- Detail -->
+  <section class="card">
+    <h2>明細（依篩選結果）</h2>
+    <div class="tableWrap">
+      <table id="tblDetail">
+        <thead id="detailHead"></thead>
+        <tbody id="detailBody"></tbody>
+      </table>
+    </div>
+    <p class="hint">提示：正式版請提供「匯出 Excel」與「依料號 Drill-down（跨三檔合併）」以利追因。</p>
+  </section>
+
+</main>
+
+<script>
+  // ---------- Utilities ----------
+  const $ = (id) => document.getElementById(id);
+  const fmtNum = (n) => (Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: 2 }) : "—");
+  const fmtPct = (n) => (Number.isFinite(n) ? (n*100).toFixed(1) + "%" : "—");
+
+  function toDateOnly(v){
+    if(!v) return null;
+    if (v instanceof Date && !isNaN(v)) return new Date(v.getFullYear(), v.getMonth(), v.getDate());
+    // handle strings like 2025/3/24 or 2025-12-1
+    const s = String(v).trim();
+    const m = s.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
+    if(m){
+      const d = new Date(Number(m[1]), Number(m[2])-1, Number(m[3]));
+      return isNaN(d) ? null : d;
+    }
+    const d2 = new Date(s);
+    return isNaN(d2) ? null : new Date(d2.getFullYear(), d2.getMonth(), d2.getDate());
+  }
+
+  function monthKey(d){
+    if(!d) return "未知";
+    const y = d.getFullYear();
+    const m = String(d.getMonth()+1).padStart(2,"0");
+    return `${y}-${m}`;
+  }
+
+  async function readFile(file){
+    const name = file.name.toLowerCase();
+    const buf = await file.arrayBuffer();
+    if(name.endsWith(".csv")){
+      const text = new TextDecoder("utf-8").decode(buf);
+      // Basic CSV parse (handles simple CSV). For complex CSV, plug PapaParse later.
+      const lines = text.split(/\r?\n/).filter(l => l.trim().length);
+      const headers = lines[0].split(",").map(h => h.trim());
+      const rows = lines.slice(1).map(line => {
+        const cols = line.split(","); // simple
+        const obj = {};
+        headers.forEach((h,i)=> obj[h] = cols[i]?.trim() ?? "");
+        return obj;
+      });
+      return rows;
+    }
+    // Excel
+    const wb = XLSX.read(buf, { type:"array" });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    return XLSX.utils.sheet_to_json(ws, { defval:"" });
+  }
+
+  // ---------- Normalization: map 5001/5002/5003 into unified rows ----------
+  function norm5001(r){
+    const time = toDateOnly(r["時間"] ?? r["time"]);
+    const planIn = Number(r["計劃入庫量"] ?? r["计划入库量"] ?? 0) || 0;
+    const actualIn = Number(r["實際入庫量"] ?? r["实际入库量"] ?? 0) || 0;
+    const pendingIn = Number(r["未入庫數量"] ?? r["未入库数量"] ?? 0) || 0;
+
+    const matAmt = Number(r["Material Amount Net"] ?? r["Material Amount\nNet"] ?? r["Material Amount Net "] ?? r["Material Amount\nNet "] ?? r["Material Amount\nNet"] ?? r["Material Amount Net"] ?? r["Material Amount\nNet"] ?? r["Material Amount\nNet"] ?? r["Material Amount\nNet"] ?? r["Material Amount Net"] ?? r["Material Amount\nNet"] ?? r["Material Amount\nNet"] ?? r["Material Amount\nNet"] ?? r["Material Amount Net"] ?? 0) || 0;
+    const dlohAmt = Number(r["DLOH Amount Net"] ?? r["DLOH Amount\nNet"] ?? 0) || 0;
+
+    return {
+      source_file: "5001",
+      data_type: r["資料類型"] ?? "WIP",
+      bu: r["BU"] ?? r["Bu"] ?? "",
+      org: r["Org"] ?? "",
+      item_no: r["料號"] ?? "",
+      category: r["大分類"] ?? "",
+      item_name: r["品名"] ?? "",
+      item_type: r["Item Type"] ?? "",
+      item_class: r["Item Class"] ?? "",
+      business: r["Business"] ?? "",
+      planner: r["Planner"] ?? "",
+      currency: r["幣別"] ?? r["Currency"] ?? "",
+      time,
+      qty: pendingIn, // for unified display, use pending as the most actionable qty
+      material_amount: matAmt,
+      dloh_amount: dlohAmt,
+      total_cost: (Number(r["在製品總成本"] ?? 0) || 0) || (matAmt + dlohAmt),
+      wip: {
+        wo_no: r["工單號"] ?? "",
+        status: r["狀態"] ?? "",
+        plan_in_qty: planIn,
+        actual_in_qty: actualIn,
+        pending_in_qty: pendingIn,
+        plan_start: toDateOnly(r["預計開始日期"]),
+        plan_finish: toDateOnly(r["預計完成日期"]),
+        defect_desc: r["異常缺陷描述"] ?? "",
+        outsource_vendor: r["委外廠商"] ?? "",
+        msg: r["整合訊息"] ?? ""
+      },
+      otw: null,
+      receiving: null
+    };
+  }
+
+  function norm5002(r){
+    const time = toDateOnly(r["時間"] ?? r["time"]);
+    const qty = Number(r["Q'ty"] ?? r["Qty"] ?? 0) || 0;
+    const matAmt = Number(r["Material Amount"] ?? 0) || 0;
+    const dlohAmt = Number(r["DLOH Amount"] ?? 0) || 0;
+    const total = Number(r["總成本"] ?? 0) || (matAmt + dlohAmt);
+    const age = Number(r["庫齡"] ?? 0) || 0;
+    const lcm = Number(r["LCM AMT"] ?? 0) || 0;
+
+    return {
+      source_file: "5002",
+      data_type: r["資料類型"] ?? "OTW",
+      bu: r["BU"] ?? r["Bu"] ?? "",
+      org: r["Org"] ?? "",
+      item_no: r["料號"] ?? "",
+      category: r["大分類"] ?? "",
+      item_name: r["品名"] ?? "",
+      item_type: r["Item Type"] ?? "",
+      item_class: r["Item Class"] ?? "",
+      business: r["Business"] ?? "",
+      planner: r["Planner"] ?? "",
+      currency: r["幣別"] ?? r["Currency"] ?? "",
+      time,
+      qty,
+      material_amount: matAmt,
+      dloh_amount: dlohAmt,
+      total_cost: total,
+      wip: null,
+      otw: {
+        warehouse_grade: r["Fin_等級倉"] ?? "",
+        warehouse: r["庫房"] ?? "",
+        warehouse_desc: r["庫房 說明"] ?? "",
+        age,
+        provision_rate: r["提列比率"] ?? "",
+        lcm_amt: lcm
+      },
+      receiving: null
+    };
+  }
+
+  function norm5003(r){
+    const time = toDateOnly(r["時間"] ?? r["time"]);
+    const qty = Number(r["Q'ty"] ?? r["Qty"] ?? 0) || 0;
+    const matAmt = Number(r["Material Amount"] ?? 0) || 0;
+    const ntdAmt = Number(r["NTDMaterial Amount"] ?? r["NTD Material Amount"] ?? 0) || 0;
+
+    return {
+      source_file: "5003",
+      data_type: r["資料類型"] ?? "RECEIVING",
+      bu: r["BU"] ?? r["Bu"] ?? "",
+      org: r["Org"] ?? "",
+      item_no: r["料號"] ?? "",
+      category: r["大分類"] ?? "",
+      item_name: r["品名"] ?? "",
+      item_type: r["Item Type"] ?? "",
+      item_class: r["Item Class"] ?? r["Item Class Desc"] ?? "",
+      business: r["Business"] ?? "",
+      planner: r["Planner"] ?? "",
+      currency: r["Currency"] ?? r["幣別"] ?? "",
+      time,
+      qty,
+      material_amount: (matAmt || ntdAmt),
+      dloh_amount: 0,
+      total_cost: (matAmt || ntdAmt),
+      wip: null,
+      otw: null,
+      receiving: {
+        uom: r["UOM"] ?? "",
+        consigned: String(r["Consigned料號"] ?? r["Consigned"] ?? "").trim().toUpperCase() === "Y"
+      }
+    };
+  }
+
+  function buildQualityHint(rows){
+    const missingTime = rows.filter(x => !x.time).length;
+    const missingKey = rows.filter(x => !(x.bu && x.org && x.item_no)).length;
+    const parts = [];
+    if(missingTime) parts.push(`時間缺失 ${missingTime} 筆（趨勢圖會失真）`);
+    if(missingKey) parts.push(`BU/Org/料號缺失 ${missingKey} 筆（跨檔合併會受影響）`);
+    $("dataQualityHint").textContent = parts.length ? ("資料品質提醒： " + parts.join("；")) : "";
+  }
+
+  // ---------- State ----------
+  let ALL = [];      // unified rows
+  let FILTERED = []; // filtered rows
+  let trendChart = null;
+
+  // ---------- Filters ----------
+  function uniqueSorted(arr){ return [...new Set(arr.filter(Boolean))].sort(); }
+  function fillSelect(sel, values){
+    const prev = sel.value;
+    sel.innerHTML = `<option value="">全部</option>` + values.map(v => `<option value="${String(v).replaceAll('"','&quot;')}">${v}</option>`).join("");
+    if(values.includes(prev)) sel.value = prev;
+  }
+
+  function refreshFilterOptions(){
+    fillSelect($("fltBU"), uniqueSorted(ALL.map(x=>x.bu)));
+    fillSelect($("fltOrg"), uniqueSorted(ALL.map(x=>x.org)));
+    fillSelect($("fltBiz"), uniqueSorted(ALL.map(x=>x.business)));
+    fillSelect($("fltPlanner"), uniqueSorted(ALL.map(x=>x.planner)));
+    fillSelect($("fltCur"), uniqueSorted(ALL.map(x=>x.currency)));
+  }
+
+  function applyFilters(){
+    const ft = $("fltType").value;
+    const fbu = $("fltBU").value;
+    const forg = $("fltOrg").value;
+    const fbiz = $("fltBiz").value;
+    const fpl = $("fltPlanner").value;
+    const fcur = $("fltCur").value;
+    const fitem = $("fltItem").value.trim();
+    const fname = $("fltName").value.trim();
+    const s = $("fltStart").value ? new Date($("fltStart").value) : null;
+    const e = $("fltEnd").value ? new Date($("fltEnd").value) : null;
+
+    FILTERED = ALL.filter(x=>{
+      if(ft && x.data_type !== ft) return false;
+      if(fbu && x.bu !== fbu) return false;
+      if(forg && x.org !== forg) return false;
+      if(fbiz && x.business !== fbiz) return false;
+      if(fpl && x.planner !== fpl) return false;
+      if(fcur && x.currency !== fcur) return false;
+      if(fitem && !String(x.item_no).includes(fitem)) return false;
+      if(fname && !String(x.item_name).toLowerCase().includes(fname.toLowerCase())) return false;
+      if(s && x.time && x.time < s) return false;
+      if(e && x.time && x.time > e) return false;
+      return true;
+    });
+
+    renderAll();
+  }
+
+  function resetFilters(){
+    ["fltType","fltBU","fltOrg","fltBiz","fltPlanner","fltCur"].forEach(id => $(id).value="");
+    ["fltItem","fltName","fltStart","fltEnd"].forEach(id => $(id).value="");
+    FILTERED = ALL.slice();
+    renderAll();
+  }
+
+  // ---------- KPI ----------
+  function sum(arr, fn){ return arr.reduce((a,b)=>a+(fn(b)||0),0); }
+  function renderKPI(){
+    const otw = FILTERED.filter(x=>x.data_type==="OTW");
+    const wip = FILTERED.filter(x=>x.data_type==="WIP");
+    const recv = FILTERED.filter(x=>x.data_type==="RECEIVING");
+
+    const otwCost = sum(otw, x=>x.total_cost);
+    const aging90 = sum(otw.filter(x=> (x.otw?.age||0) > 90), x=>x.total_cost);
+    const lcm = sum(otw, x=>x.otw?.lcm_amt||0);
+
+    const wipGap = sum(wip, x=>x.wip?.pending_in_qty||0);
+    const wipPlan = sum(wip, x=>x.wip?.plan_in_qty||0);
+    const wipActual = sum(wip, x=>x.wip?.actual_in_qty||0);
+    const wipHit = wipPlan > 0 ? (wipActual / wipPlan) : NaN;
+
+    const wipAbn = wip.filter(x=>{
+      const d = (x.wip?.defect_desc||"").trim();
+      const m = (x.wip?.msg||"").trim();
+      return d.length>0 || (m && m !== "正常作业" && m !== "正常作業");
+    }).length;
+
+    const recvQty = sum(recv, x=>x.qty);
+    const consQty = sum(recv.filter(x=>x.receiving?.consigned), x=>x.qty);
+    const consPct = recvQty > 0 ? consQty/recvQty : NaN;
+
+    $("kpiOtwCost").textContent = fmtNum(otwCost);
+    $("kpiAging90").textContent = fmtNum(aging90);
+    $("kpiLCM").textContent = fmtNum(lcm);
+    $("kpiWipGap").textContent = fmtNum(wipGap);
+    $("kpiWipHit").textContent = fmtPct(wipHit);
+    $("kpiWipAbn").textContent = fmtNum(wipAbn);
+    $("kpiRecvQty").textContent = fmtNum(recvQty);
+    $("kpiConsigned").textContent = fmtPct(consPct);
+  }
+
+  // ---------- Trend Chart ----------
+  function renderTrend(){
+    const byMonth = new Map(); // key -> {OTW, WIP, RECEIVING}
+    for(const r of FILTERED){
+      const k = monthKey(r.time);
+      if(!byMonth.has(k)) byMonth.set(k, { OTW:0, WIP:0, RECEIVING:0 });
+      byMonth.get(k)[r.data_type] += (r.total_cost||0);
+    }
+    const labels = [...byMonth.keys()].sort();
+    const otw = labels.map(k=>byMonth.get(k).OTW);
+    const wip = labels.map(k=>byMonth.get(k).WIP);
+    const rec = labels.map(k=>byMonth.get(k).RECEIVING);
+
+    const ctx = $("chartTrend");
+    if(trendChart) trendChart.destroy();
+    trendChart = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels,
+        datasets: [
+          { label:"OTW 成本", data: otw, tension:0.25 },
+          { label:"WIP 成本", data: wip, tension:0.25 },
+          { label:"Receiving 成本", data: rec, tension:0.25 },
+        ]
+      },
+      options: {
+        responsive:true,
+        plugins: { legend:{ labels:{ color:"#cfe0ff" } } },
+        scales: {
+          x: { ticks:{ color:"#9fb0d0" }, grid:{ color:"#21304f" } },
+          y: { ticks:{ color:"#9fb0d0" }, grid:{ color:"#21304f" } },
+        }
+      }
+    });
+  }
+
+  // ---------- Alerts ----------
+  function topN(arr, n, fn){
+    return arr.slice().sort((a,b)=>(fn(b)||0)-(fn(a)||0)).slice(0,n);
+  }
+
+  function renderAlerts(){
+    const tbody = $("tblAlerts").querySelector("tbody");
+    tbody.innerHTML = "";
+
+    const today = new Date();
+    const otw = FILTERED.filter(x=>x.data_type==="OTW");
+    const wip = FILTERED.filter(x=>x.data_type==="WIP");
+
+    const a1 = topN(otw.filter(x=>(x.otw?.age||0)>90), 10, x=>x.total_cost)
+      .map(x=>({type:"OTW", kpi:"庫齡>90 成本", val:x.total_cost, row:x}));
+
+    const a2 = topN(otw, 10, x=>x.otw?.lcm_amt||0)
+      .filter(x=>(x.val||0)>0)
+      .map(x=>({type:"OTW", kpi:"LCM AMT", val:x.val, row:x.row}));
+
+    const a3 = topN(
+      wip.filter(x=>x.wip?.plan_finish && x.wip.plan_finish < today && (x.wip?.pending_in_qty||0)>0),
+      10,
+      x=>x.wip?.pending_in_qty||0
+    ).map(x=>({type:"WIP", kpi:"逾期未入庫", val:x.wip.pending_in_qty, row:x}));
+
+    const alerts = [...a1, ...a2, ...a3].slice(0,10);
+    for(const a of alerts){
+      const r = a.row;
+      const t = r.time ? r.time.toISOString().slice(0,10) : "";
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${a.type}</td>
+        <td>${r.bu||""}</td>
+        <td>${r.org||""}</td>
+        <td>${r.item_no||""}</td>
+        <td>${a.kpi}</td>
+        <td>${fmtNum(a.val)}</td>
+        <td>${t}</td>
+      `;
+      tbody.appendChild(tr);
+    }
+  }
+
+  // ---------- Detail Table ----------
+  function renderDetail(){
+    const head = $("detailHead");
+    const body = $("detailBody");
+    body.innerHTML = "";
+
+    const cols = [
+      ["data_type","類型"], ["bu","BU"], ["org","Org"], ["item_no","料號"], ["item_name","品名"],
+      ["business","Business"], ["planner","Planner"], ["currency","幣別"], ["time","時間"],
+      ["qty","數量(主動作)"], ["total_cost","總成本"],
+      ["_wip","WIP: 工單/未入庫/狀態"], ["_otw","OTW: 庫齡/庫房/LCM"], ["_recv","REC: Consigned/UOM"]
+    ];
+
+    head.innerHTML = `<tr>${cols.map(c=>`<th>${c[1]}</th>`).join("")}</tr>`;
+
+    const show = FILTERED.slice(0, 300); // avoid browser overload
+    for(const r of show){
+      const w = r.wip ? `${r.wip.wo_no||""} | 缺口:${fmtNum(r.wip.pending_in_qty)} | ${r.wip.status||""}` : "";
+      const o = r.otw ? `齡:${fmtNum(r.otw.age)} | ${r.otw.warehouse||""} | LCM:${fmtNum(r.otw.lcm_amt)}` : "";
+      const rc = r.receiving ? `${r.receiving.consigned ? "Y":"N"} | ${r.receiving.uom||""}` : "";
+      const tr = document.createElement("tr");
+      tr.innerHTML = cols.map(([k])=>{
+        let v = r[k];
+        if(k==="time") v = r.time ? r.time.toISOString().slice(0,10) : "";
+        if(k==="total_cost") v = fmtNum(r.total_cost||0);
+        if(k==="qty") v = fmtNum(r.qty||0);
+        if(k==="_wip") v = w;
+        if(k==="_otw") v = o;
+        if(k==="_recv") v = rc;
+        return `<td>${(v ?? "").toString()}</td>`;
+      }).join("");
+      body.appendChild(tr);
+    }
+  }
+
+  function renderAll(){
+    renderKPI();
+    renderTrend();
+    renderAlerts();
+    renderDetail();
+    const msg = `已載入 ${ALL.length.toLocaleString()} 筆；篩選後 ${FILTERED.length.toLocaleString()} 筆`;
+    $("statusPill").textContent = msg;
+  }
+
+  // ---------- Demo Data ----------
+  function loadDemo(){
+    const r5001 = [{
+      "BU":"Polarizer","Org":"BMB","料號":"51.UA310.413","大分類":"半成品","資料類型":"WIP","品名":"T/SS/BOE/31.5/479.7X616.6/Z_TAC(40)_HC/TS/CUT",
+      "Item Type":"B-1","Item Class":"SS","工單號":"PBB5318111","狀態":"Released",
+      "計劃入庫量":1659,"實際入庫量":2,"未入庫數量":1657,"預計開始日期":"2025/03/18","預計完成日期":"2025/03/26",
+      "Material Amount\nNet":113271,"DLOH Amount\nNet":17780,"在製品總成本":131051,
+      "Planner":"(NONE)","幣別":"NTD","整合訊息":"正常作业","異常缺陷描述":"壓點5","Business":"CHPF","委外廠商":"","時間":"2025/3/24"
+    }];
+    const r5002 = [{
+      "BU":"Polarizer","Org":"BLB","料號":"47.05B54.000","大分類":"包裝材","資料類型":"OTW","品名":"IRON PALLET/1020*1020*140MM",
+      "Item Type":"E-1","Item Class":"PF","Fin_等級倉":"A0.良品倉","庫房":"PC10","庫房 說明":"良品倉",
+      "Business":"ALL","庫齡":20,"Q'ty":20,"Material Amount":12922.4,"DLOH Amount":0,"總成本":12922.4,
+      "LCM AMT":0,"Planner":"PBMS","幣別":"NTD","時間":"2025/12/1"
+    }];
+    const r5003 = [{
+      "Bu":"Polarizer","Org":"BMB","料號":"6J.E148T.916","大分類":"他廠半成品(不換料號)","資料類型":"RECEIVING",
+      "品名":"B/SS/48T/132.82X924.32X791.5/N(40)_N(40)+APF/TT/CUT","Item Type":"B-3","Item Class":"SS","Item Class Desc":"偏光.中小尺寸偏光片",
+      "Business":"VDPF","UOM":"pcs","Q'ty":71,"Material Amount":37231.61772,"Currency":"NTD","Planner":"","Consigned料號":"N","時間":"2025/3/28"
+    }];
+
+    ALL = [
+      ...r5001.map(norm5001),
+      ...r5002.map(norm5002),
+      ...r5003.map(norm5003)
+    ];
+    FILTERED = ALL.slice();
+    refreshFilterOptions();
+    buildQualityHint(ALL);
+    renderAll();
+  }
+
+  // ---------- Events ----------
+  $("btnDemo").addEventListener("click", loadDemo);
+
+  $("btnLoad").addEventListener("click", async ()=>{
+    const files = [
+      {id:"f5001", norm:norm5001, tag:"5001"},
+      {id:"f5002", norm:norm5002, tag:"5002"},
+      {id:"f5003", norm:norm5003, tag:"5003"},
+    ];
+
+    const all = [];
+    for(const f of files){
+      const file = $(f.id).files[0];
+      if(!file) continue;
+      const rows = await readFile(file);
+      rows.forEach(r => all.push(f.norm(r)));
+    }
+
+    ALL = all;
+    FILTERED = ALL.slice();
+    refreshFilterOptions();
+    buildQualityHint(ALL);
+    renderAll();
+  });
+
+  $("btnApply").addEventListener("click", applyFilters);
+  $("btnReset").addEventListener("click", resetFilters);
+
+  // default demo
+  loadDemo();
+</script>
+</body>
+</html>
